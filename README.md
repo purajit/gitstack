@@ -1,5 +1,9 @@
+## Installation
 add .gitstack to your global gitignore
-currently, I just add the path to my clone to my PATH and use `gst <command>`
+clone this repo
+currently, I just add the path to my clone to my PATH
+
+## Usage
 
 ### Create new branch
 gst b new_branch_name (from trunk)
