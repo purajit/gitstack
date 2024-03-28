@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Mapping, Set
+from typing import Callable, List, Mapping, Set
 
 GITSTACK_FILE = os.environ.get("GITSTACK_FILE", ".gitstack")
 TRUNK_CANDIDATES = ["main", "master"]
@@ -35,6 +35,7 @@ class NoValidTrunkError(Exception):
 
 class GitStack:
     def __init__(self) -> None:
+        self.stack_changed = False
         self.gitstack = read_gitstack_file()
         self.gitstack_children: Mapping[str, List[str]] = {}
         self.trunk = self._get_trunk()
@@ -51,6 +52,9 @@ class GitStack:
             else:
                 parent = self.trunk
             self.create_branch(branch, parent)
+        elif operation in {"p", "print"}:
+            assert len(args) == 0
+            self.print_stack()
         elif operation in {"d", "down"}:
             assert len(args) == 0
             self.switch_to_parent()
@@ -66,7 +70,15 @@ class GitStack:
             self.sync()
 
     def wrapup(self) -> None:
-        write_gitstack_file(self.gitstack)
+        if self.stack_changed:
+            write_gitstack_file(self.gitstack)
+
+    def print_stack(self):
+        self._traverse_stack(
+            lambda branch, depth: print(" " * (2 * (depth - 1)) + "↳ " + branch)
+            if depth > 0
+            else print(branch)
+        )
 
     def create_branch(self, branch: str, parent) -> None:
         subprocess.run(
@@ -125,20 +137,26 @@ class GitStack:
         )
 
     def sync(self):
-        visited = set([self.trunk])
-        queue = [(self.trunk, 0)]
+        self._traverse_stack(lambda branch, depth: self._check_and_rebase(branch))
 
-        while queue:
-            branch, depth = queue.pop(0)
-            if branch != self.trunk:
-                self._check_and_rebase(branch)
+    def _traverse_stack(self, fn: Callable[[str, int], None]):
+        visited = set()
+        tracking_stack = [(self.trunk, 0)]
+
+        while tracking_stack:
+            branch, depth = tracking_stack.pop()
+            if branch in visited:
+                continue
+            fn(branch, depth)
+            visited.add(branch)
             for child_branch in self.gitstack_children.get(branch, []):
                 if child_branch in visited:
                     continue
-                visited.add(child_branch)
-                queue.append((child_branch, depth + 1))
+                tracking_stack.append((child_branch, depth + 1))
 
     def _check_and_rebase(self, branch: str) -> None:
+        if branch == self.trunk:
+            return
         parent = self.gitstack[branch]
         p = subprocess.run(
             ["git", "show-ref", "--heads", "-s", parent],
@@ -194,6 +212,7 @@ class GitStack:
     def _track_branch(self, branch: str, parent: str) -> None:
         self.gitstack[branch] = parent
         self.gitstack_children.setdefault(parent, []).append(branch)
+        self.stack_changed = True
 
 
 def parse_args() -> None:
