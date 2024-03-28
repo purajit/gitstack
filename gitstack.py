@@ -54,6 +54,9 @@ class GitStack:
         elif operation in {"d", "down"}:
             assert len(args) == 0
             self.switch_to_parent()
+        elif operation in {"u", "up"}:
+            assert len(args) == 0
+            self.switch_to_child()
         elif operation in {"t", "track"}:
             assert len(args) == 1
             parent = args[0]
@@ -79,8 +82,43 @@ class GitStack:
         self._track_branch(branch, parent)
 
     def switch_to_parent(self) -> None:
+        current_branch = self._get_current_branch()
+        if current_branch == self.trunk:
+            print("Already on trunk")
+            return
+        if current_branch not in self.gitstack:
+            print(
+                f"Current branch {current_branch} not tracked by gst, use `gst t <parent>` and try again"
+            )
+            return
+        parent = self.gitstack[self._get_current_branch()]
         subprocess.run(
-            ["git", "switch", self.gitstack[self._get_current_branch()]],
+            ["git", "switch", parent],
+            check=True,
+            stdout=sys.stdout.buffer,
+            stderr=sys.stderr.buffer,
+        )
+
+    def switch_to_child(self) -> None:
+        current_branch = self._get_current_branch()
+        child_branches = self.gitstack_children.get(self._get_current_branch(), [])
+        child_branch: str
+        if len(child_branches) < 1:
+            print(
+                f"Current branch {current_branch} has no children, or isn't tracked by gst."
+            )
+            return
+        if len(child_branches) == 1:
+            child_branch = child_branches[0]
+        else:
+            print("Multiple child branches to choose from: ")
+            for i, child_branch in enumerate(child_branches):
+                print(f"{i}. {child_branch}")
+            child_branch_idx = int(input("Select by number: "))
+            child_branch = child_branches[child_branch_idx]
+
+        subprocess.run(
+            ["git", "switch", child_branch],
             check=True,
             stdout=sys.stdout.buffer,
             stderr=sys.stderr.buffer,
@@ -170,7 +208,7 @@ def parse_args() -> None:
 
 
 if __name__ == "__main__":
-    args = parse_args()
+    program_args = parse_args()
     gitstack = GitStack()
-    gitstack.operate(args.operation, args.args)
+    gitstack.operate(program_args.operation, program_args.args)
     gitstack.wrapup()
