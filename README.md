@@ -12,6 +12,11 @@ gst b new_branch_name parent_branch
 gst b new_branch_name .  # (same as above)
 ```
 
+### Print the stack
+```sh
+gst p
+```
+
 ### Traverse the stack
 ```sh
 gst d  # down
