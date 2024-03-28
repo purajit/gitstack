@@ -26,7 +26,7 @@ gst u  # up, will ask you to choose if multiple options
 ```sh
 gst s
 ```
-### Track branch not tracked by gst
+### Track branch not tracked by gst/switch parent
 ```sh
 gst t parent_branch
 ```
