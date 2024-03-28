@@ -12,9 +12,10 @@ gst b new_branch_name parent_branch
 gst b new_branch_name .  # (same as above)
 ```
 
-### Go down stack
+### Traverse the stack
 ```sh
-gst d
+gst d  # down
+gst u  # up, will ask you to choose if multiple options
 ```
 ### Rebase all branches on trunk
 ```sh
