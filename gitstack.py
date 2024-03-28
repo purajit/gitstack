@@ -90,7 +90,29 @@ class GitStack:
         self._track_branch(branch, parent)
 
     def track_current_branch(self, parent):
+        if parent not in self._list_all_branches():
+            print(f"Branch {parent} does not exist")
+            return
+
         branch = self._get_current_branch()
+        if branch == parent:
+            print("Branch cannot be its own parent")
+            return
+        if branch == self.trunk:
+            print("Trunk cannot have a parent")
+            return
+
+        if branch in self.gitstack and parent == self.gitstack[branch]:
+            print(f"Parent of {branch} is already {parent}, no changes needed.")
+            return
+        elif branch in self.gitstack:
+            response = input(
+                f"This will switch the parent of {branch} from {self.gitstack[branch]} to {parent}. y/N"
+            )
+            if response not in {"y", "Y"}:
+                return
+            # TODO: replay commits on different base branch
+
         self._track_branch(branch, parent)
 
     def switch_to_parent(self) -> None:
