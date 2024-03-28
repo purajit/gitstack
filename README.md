@@ -7,9 +7,9 @@ currently, I just add the path to my clone to my PATH
 
 ### Create new branch
 ```sh
-gst b new_branch_name  # (from trunk)
+gst b new_branch_name  # from trunk
 gst b new_branch_name parent_branch
-gst b new_branch_name .  # (same as above)
+gst b new_branch_name .  # from current branch
 ```
 
 ### Print the stack
