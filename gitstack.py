@@ -67,6 +67,10 @@ class NoValidTrunkError(Exception):
     """Error for when none of the trunk candidates match"""
 
 
+class UnhandledPRStateError(Exception):
+    """Error for when none of the trunk candidates match"""
+
+
 class GitStack:
     """Main GitStack implementation"""
 
@@ -234,6 +238,7 @@ class GitStack:
         all_branches = git_list_all_branches()
         if branch not in all_branches:
             self._untrack_branch(branch)
+            return
 
         # if merged, remove from gitstack
         subprocess.run(
@@ -266,7 +271,7 @@ class GitStack:
                     f"Branch {branch} has been closed, delete local branch? (Y/n) "
                 )
             else:
-                raise Exception(f"Unknown state {pr_state}")
+                raise UnhandledPRStateError(f"Unknown state {pr_state}")
 
             if should_remove in ("", "Y", "y"):
                 self._delete_branch(branch)
