@@ -342,9 +342,9 @@ class GitStack:
         """Remove branch from gitstack, and handle its children"""
         parent = self.gitstack.pop(branch)
         children = self.gitstack_children.pop(branch, set())
-        for children in self.gitstack_children.values():
-            if branch in children:
-                children.remove(branch)
+        for current_children in self.gitstack_children.values():
+            if branch in current_children:
+                current_children.remove(branch)
         self._track_branches(children, parent)
 
 
