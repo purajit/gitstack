@@ -266,7 +266,7 @@ class GitStack:
                 should_remove = input(
                     f"Branch {branch} has already been merged into master, delete local branch? (Y/n) "
                 )
-            elif pr_state == "MERGED":
+            elif pr_state == "CLOSED":
                 should_remove = input(
                     f"Branch {branch} has been closed, delete local branch? (Y/n) "
                 )
