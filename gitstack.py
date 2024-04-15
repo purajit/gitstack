@@ -20,7 +20,7 @@ logger.setLevel(logging.INFO)
 def read_gitstack_file() -> MutableMapping[str, str]:
     """Read the gitstack file at the current git root"""
     gitstack_path = git_get_root() / GITSTACK_FILE
-    if not Path(GITSTACK_FILE).is_file():
+    if not Path(gitstack_path).is_file():
         return {}
     with open(gitstack_path) as f:
         return json.loads(f.read())
