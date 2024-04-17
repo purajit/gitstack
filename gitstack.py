@@ -63,6 +63,13 @@ def git_get_current_branch() -> str:
     return p.stdout.decode().strip()
 
 
+def print_branch_level(branch: str, current_branch: str, depth: int) -> None:
+    """Prints a branch line as part of a tree"""
+    branch_line = f"\u001b[32m{branch}\u001b[0m" if branch == current_branch else branch
+    level_indicator = " " * (2 * (depth - 1)) + "↳ "
+    print(f"{level_indicator}{branch_line}" if depth > 0 else branch_line)
+
+
 class NoValidTrunkError(Exception):
     """Error for when none of the trunk candidates match"""
 
@@ -117,10 +124,9 @@ class GitStack:
 
     def print_stack(self):
         """Pretty print the entire stack"""
+        current_branch = git_get_current_branch()
         self._traverse_stack(
-            lambda branch, depth: print(" " * (2 * (depth - 1)) + "↳ " + branch)
-            if depth > 0
-            else print(branch)
+            lambda branch, depth: print_branch_level(branch, current_branch, depth)
         )
 
     def create_branch(self, branch: str, parent) -> None:
@@ -211,7 +217,15 @@ class GitStack:
 
     def sync(self):
         """Rebase all branches on top of current trunk"""
+        current_branch = git_get_current_branch()
         self._traverse_stack(lambda branch, depth: self._check_and_rebase(branch))
+        # switch back to original branch once done
+        subprocess.run(
+            ["git", "switch", current_branch],
+            check=True,
+            stdout=sys.stdout.buffer,
+            stderr=sys.stderr.buffer,
+        )
 
     def _traverse_stack(self, fn: Callable[[str, int], None]):
         """DFS through the gitstack from trunk, calling a function on each branch"""
