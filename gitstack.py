@@ -172,6 +172,13 @@ class GitStack:
 
             branch = self.switch_to_parent()
 
+        subprocess.run(
+            ["git", "switch", self.original_branch],
+            check=True,
+            stdout=sys.stdout.buffer,
+            stderr=sys.stderr.buffer,
+        )
+
     def create_branch(self, branch: str, parent) -> None:
         """Create new branch and add to gitstack"""
         subprocess.run(
