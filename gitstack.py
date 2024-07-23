@@ -173,6 +173,7 @@ class GitStack:
             branch = self.switch_to_parent()
 
         subprocess.run(
+            # asdf
             ["git", "switch", self.original_branch],
             check=True,
             stdout=sys.stdout.buffer,
