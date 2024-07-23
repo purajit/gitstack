@@ -114,9 +114,9 @@ class GitStack:
             assert len(args) == 1
             parent = args[0]
             self.track_current_branch(parent)
-        elif operation in {"su", "submit"}:
+        elif operation in {"pr"}:
             assert len(args) == 0
-            self.submit_stack()
+            self.create_prs()
         elif operation in {"s", "sync"}:
             assert len(args) == 0
             self.sync()
@@ -134,8 +134,9 @@ class GitStack:
             )
         )
 
-    def submit_stack(self):
+    def create_prs(self):
         """Submit the stack starting at the current branch going down"""
+        branch = self.original_branch
         while branch != self.trunk:
             p = subprocess.run(
                 [
@@ -152,7 +153,13 @@ class GitStack:
             )
             has_pr = bool(p.stdout.decode().strip())
             if has_pr:
-                pass
+                subprocess.run(
+                    ["git", "push"],
+                    check=True,
+                    stdout=sys.stdout.buffer,
+                    stderr=sys.stderr.buffer,
+                )
+                print(f"Updated PR for {branch}")
             else:
                 parent = self.gitstack[branch]
                 subprocess.run(
@@ -161,6 +168,7 @@ class GitStack:
                     stdout=sys.stdout.buffer,
                     stderr=sys.stderr.buffer,
                 )
+                print(f"Created PR for {branch}")
 
             branch = self.switch_to_parent()
 
@@ -180,7 +188,7 @@ class GitStack:
             print(f"Branch {parent} does not exist")
             return
 
-        branch = git_get_current_branch()
+        branch = self.original_branch
         if branch == parent:
             print("Branch cannot be its own parent")
             return
@@ -203,7 +211,7 @@ class GitStack:
 
     def switch_to_parent(self) -> str:
         """Go one step above the stack, closer to trunk"""
-        current_branch = git_get_current_branch()
+        current_branch = self.original_branch
         if current_branch == self.trunk:
             print("Already on trunk")
             return current_branch
@@ -223,7 +231,7 @@ class GitStack:
 
     def switch_to_child(self) -> str:
         """Go one step deeper into the stack, further from trunk"""
-        current_branch = git_get_current_branch()
+        current_branch = self.original_branch
         if current_branch != self.trunk and current_branch not in self.gitstack:
             print(f"Current branch {current_branch} isn't tracked by gst.")
             return current_branch
@@ -342,12 +350,12 @@ class GitStack:
         )
         current_base_sha = p.stdout.decode().strip()
         if current_parent_sha == current_base_sha:
-            logger.info(
-                "Branch %s doesn't need to be rebased on top of %s", branch, parent
+            print(
+                f"Branch {branch} up-to-date with {parent}", branch, parent
             )
             return
-        logger.info("Rebasing %s on top of %s", branch, parent)
-        subprocess.run(["git", "rebase", parent, branch], check=True)
+        print(f"Merging {parent} into {branch}")
+        subprocess.run(["git", "merge", parent], check=True)
 
     def _get_trunk(self):
         """Get name of trunk based on possible candidates"""
