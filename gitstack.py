@@ -138,6 +138,7 @@ class GitStack:
         """Submit the stack starting at the current branch going down"""
         branch = self.original_branch
         while branch != self.trunk:
+            print("AAA", branch, self.trunk)
             p = subprocess.run(
                 [
                     "gh",
@@ -172,6 +173,7 @@ class GitStack:
 
             branch = self.switch_to_parent()
 
+        print("out")
         subprocess.run(
             # asdf
             ["git", "switch", self.original_branch],
