@@ -12,6 +12,11 @@ gst b new_branch_name parent_branch
 gst b new_branch_name .  # from current branch
 ```
 
+### Submit/update a stack
+```sh
+gst pr
+```
+
 ### Print the stack
 ```sh
 gst p
