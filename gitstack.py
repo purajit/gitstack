@@ -221,7 +221,7 @@ class GitStack:
 
     def switch_to_parent(self) -> str:
         """Go one step above the stack, closer to trunk"""
-        current_branch = self.original_branch
+        current_branch = git_get_current_branch()
         if current_branch == self.trunk:
             print("Already on trunk")
             return current_branch
@@ -241,7 +241,7 @@ class GitStack:
 
     def switch_to_child(self) -> str:
         """Go one step deeper into the stack, further from trunk"""
-        current_branch = self.original_branch
+        current_branch = git_get_current_branch()
         if current_branch != self.trunk and current_branch not in self.gitstack:
             print(f"Current branch {current_branch} isn't tracked by gst.")
             return current_branch
