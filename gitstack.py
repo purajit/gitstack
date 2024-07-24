@@ -357,12 +357,10 @@ class GitStack:
         )
         current_base_sha = p.stdout.decode().strip()
         if current_parent_sha == current_base_sha:
-            print(
-                f"Branch {branch} up-to-date with {parent}", branch, parent
-            )
+            print(f"Branch {branch} up-to-date with {parent}", branch, parent)
             return
         print(f"Merging {parent} into {branch}")
-        subprocess.run(["git", "merge", parent], check=True)
+        subprocess.run(["git", "merge", "--no-ff", "--no-edit", parent], check=True)
 
     def _get_trunk(self):
         """Get name of trunk based on possible candidates"""
