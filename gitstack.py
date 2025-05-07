@@ -20,6 +20,8 @@ logger.setLevel(logging.INFO)
 NC = "\033[0m"
 RED = "\033[31m"
 GREEN = "\033[32m"
+YELLOW = "\033[33m"
+BLUE = "\033[34m"
 GREY = "\033[90m"
 BOLD = "\033[1m"
 
@@ -170,6 +172,12 @@ class GitStack:
             if branch in local_branches
             else None
         )
+        untracked_branches = local_branches - self.gitstack.keys() - {self.trunk}
+        if untracked_branches:
+            print()
+            print(f"{RED}Branches not tracked by gitstack:{NC}")
+            for untracked_branch in untracked_branches:
+                print(f"* {untracked_branch}")
 
     def create_prs(self):
         """Submit the stack starting at the current branch going down"""
@@ -210,7 +218,7 @@ class GitStack:
                     stdout=sys.stdout.buffer,
                     stderr=sys.stderr.buffer,
                 )
-                print(f"Created PR for {branch}")
+                print(f"{GREEN}Created PR for {BLUE}{branch}{NC}")
 
             branch = self.switch_to_parent()
 
@@ -239,23 +247,25 @@ class GitStack:
     def track_current_branch(self, parent):
         """Add current branch to gitstack tracking"""
         if parent not in git_list_all_branches():
-            print(f"Branch {parent} does not exist")
+            print(f"{RED}Branch {BLUE}{parent}{RED} does not exist{NC}")
             return
 
         branch = self.original_branch
         if branch == parent:
-            print("Branch cannot be its own parent")
+            print("{RED}Branch cannot be its own parent{NC}")
             return
         if branch == self.trunk:
-            print("Trunk cannot have a parent")
+            print("{RED}Trunk cannot have a parent{NC}")
             return
 
         if branch in self.gitstack and parent == self.gitstack[branch]:
-            print(f"Parent of {branch} is already {parent}, no changes needed.")
+            print(
+                f"{GREY}Parent of {BLUE}{branch}{GREY} is already {BLUE}{parent}{GREY}, no changes needed.{NC}"
+            )
             return
         if branch in self.gitstack:
             response = input(
-                f"This will switch the parent of {branch} from {self.gitstack[branch]} to {parent} (y/N) "
+                f"{RED}This will switch the parent of {BLUE}{branch}{RED} from {self.gitstack[branch]} to {BLUE}{parent}{RED} (y/N) {NC}"
             )
             if response not in {"y", "Y"}:
                 return
@@ -267,11 +277,11 @@ class GitStack:
         """Go one step above the stack, closer to trunk"""
         current_branch = git_get_current_branch()
         if current_branch == self.trunk:
-            print("Already on trunk")
+            print(f"{GREY}Already on trunk{NC}")
             return current_branch
         if current_branch not in self.gitstack:
             print(
-                f"Current branch {current_branch} not tracked by gst, use `gst t <parent>` and try again"
+                f"{RED}Current branch {current_branch} not tracked by gst, use `gst t <parent>` and try again{NC}"
             )
             return current_branch
         parent = self.gitstack[current_branch]
@@ -287,12 +297,12 @@ class GitStack:
         """Go one step deeper into the stack, further from trunk"""
         current_branch = git_get_current_branch()
         if current_branch != self.trunk and current_branch not in self.gitstack:
-            print(f"Current branch {current_branch} isn't tracked by gst.")
+            print(f"{RED}Current branch {current_branch} isn't tracked by gst.{NC}")
             return current_branch
 
         child_branches = self.gitstack_children.get(current_branch, set())
         if len(child_branches) < 1:
-            print(f"Current branch {current_branch} has no children.")
+            print(f"{RED}Current branch {current_branch} has no children.{NC}")
             return current_branch
 
         child_branch: str
@@ -315,7 +325,7 @@ class GitStack:
         return child_branch
 
     def sync(self):
-        """Rebase all branches on top of current trunk"""
+        """Rebase/merge all branches on top of current trunk"""
         self._traverse_stack(lambda branch, depth: self._check_and_rebase(branch))
         # switch back to original branch once done, if it exists - it may have
         # been deleted in the process of sync
@@ -344,7 +354,7 @@ class GitStack:
                 tracking_stack.append((child_branch, depth + 1))
 
     def _check_and_rebase(self, branch: str) -> None:
-        """Evaluate a branch and decide what to do - rebase, untrack, or remove"""
+        """Evaluate a branch and decide what to do - merge/rebase, untrack, or remove"""
         if branch == self.trunk:
             return
 
@@ -379,14 +389,14 @@ class GitStack:
         if (state := pr_state.get("state")) in ("MERGED", "CLOSED"):
             if state == "MERGED":
                 should_remove = input(
-                    f"Branch {branch} has already been merged into master, delete local branch? (Y/n) "
+                    f"{RED}Branch {BLUE}{branch}{RED} has already been merged into master, delete local branch? (Y/n) {NC}"
                 )
             elif state == "CLOSED":
                 should_remove = input(
-                    f"Branch {branch} has been closed, delete local branch? (Y/n) "
+                    f"{RED}Branch {BLUE}{branch}{RED} has been closed, delete local branch? (Y/n) {NC}"
                 )
             else:
-                raise UnhandledPRStateError(f"Unknown state {state}")
+                raise UnhandledPRStateError(f"{RED}Unknown state {state}{NC}")
 
             if should_remove in ("", "Y", "y"):
                 self._delete_branch(branch)
@@ -404,14 +414,33 @@ class GitStack:
             ["git", "merge-base", parent, branch], check=True, capture_output=True
         )
         current_base_sha = p.stdout.decode().strip()
-        print(f"Merging {parent} into {branch}")
         if current_parent_sha == current_base_sha:
-            print(f"Branch {branch} up-to-date with {parent}", branch, parent)
+            print(
+                f"{GREEN}Branch up-to-date {BLUE}{branch}{GREEN} -> {BLUE}{parent}{NC}"
+            )
             return
         if not pr_state or pr_state.get("isDraft"):
-            print(f"Rebasing {branch} onto {parent}")
-            subprocess.run(["git", "rebase", "-i", parent], check=True)
+            rebase_commits = (
+                subprocess.check_output(
+                    ["git", "log", "--pretty=format:'%h %s'", f"{parent}.."]
+                )
+                .decode()
+                .splitlines()
+            )
+            print(
+                f"{YELLOW}Rebasing these commits in {BLUE}{branch}{YELLOW} onto {BLUE}{parent}:{NC}"
+            )
+            for rebase_commit in rebase_commits[::-1]:
+                print(f"* {rebase_commit}")
+            response = input(
+                f"{YELLOW}Continue (no will drop into interactive rebase)? (Y/n) {NC}"
+            )
+            if response in {"n", "N"}:
+                subprocess.run(["git", "rebase", "-i", parent], check=True)
+            else:
+                subprocess.run(["git", "rebase", parent], check=True)
         else:
+            print(f"{YELLOW}Merging {BLUE}{parent}{YELLOW} into {BLUE}{branch}{NC}")
             subprocess.run(
                 ["git", "merge", "-q", "--no-ff", "--no-edit", parent], check=True
             )
