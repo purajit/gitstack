@@ -172,6 +172,12 @@ class GitStack:
             if branch in local_branches
             else None
         )
+        untracked_branches = local_branches - self.gitstack.keys() - {self.trunk}
+        if untracked_branches:
+            print()
+            print(f"{RED}Branches not tracked by gitstack:{NC}")
+            for untracked_branch in untracked_branches:
+                print(f"* {untracked_branch}")
 
     def create_prs(self):
         """Submit the stack starting at the current branch going down"""
@@ -319,7 +325,7 @@ class GitStack:
         return child_branch
 
     def sync(self):
-        """Rebase all branches on top of current trunk"""
+        """Rebase/merge all branches on top of current trunk"""
         self._traverse_stack(lambda branch, depth: self._check_and_rebase(branch))
         # switch back to original branch once done, if it exists - it may have
         # been deleted in the process of sync
@@ -348,7 +354,7 @@ class GitStack:
                 tracking_stack.append((child_branch, depth + 1))
 
     def _check_and_rebase(self, branch: str) -> None:
-        """Evaluate a branch and decide what to do - rebase, untrack, or remove"""
+        """Evaluate a branch and decide what to do - merge/rebase, untrack, or remove"""
         if branch == self.trunk:
             return
 
@@ -414,8 +420,25 @@ class GitStack:
             )
             return
         if not pr_state or pr_state.get("isDraft"):
-            print(f"{YELLOW}Rebasing {BLUE}{branch}{GREEN} onto {BLUE}{parent}{NC}")
-            subprocess.run(["git", "rebase", "-i", parent], check=True)
+            rebase_commits = (
+                subprocess.check_output(
+                    ["git", "log", "--pretty=format:'%h %s'", f"{parent}.."]
+                )
+                .decode()
+                .splitlines()
+            )
+            print(
+                f"{YELLOW}Rebasing these commits in {BLUE}{branch}{YELLOW} onto {BLUE}{parent}:{NC}"
+            )
+            for rebase_commit in rebase_commits[::-1]:
+                print(f"* {rebase_commit}")
+            response = input(
+                f"{YELLOW}Continue (no will drop into interactive rebase)? (Y/n) {NC}"
+            )
+            if response in {"n", "N"}:
+                subprocess.run(["git", "rebase", "-i", parent], check=True)
+            else:
+                subprocess.run(["git", "rebase", parent], check=True)
         else:
             print(f"{YELLOW}Merging {BLUE}{parent}{YELLOW} into {BLUE}{branch}{NC}")
             subprocess.run(
