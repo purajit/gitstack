@@ -376,17 +376,17 @@ class GitStack:
         )
         pr_state_str = p.stdout.decode().strip()
         pr_state = json.loads(pr_state_str) if pr_state_str else {}
-        if pr_state.get("state") in ("MERGED", "CLOSED"):
-            if pr_state == "MERGED":
+        if (state := pr_state.get("state")) in ("MERGED", "CLOSED"):
+            if state == "MERGED":
                 should_remove = input(
                     f"Branch {branch} has already been merged into master, delete local branch? (Y/n) "
                 )
-            elif pr_state == "CLOSED":
+            elif state == "CLOSED":
                 should_remove = input(
                     f"Branch {branch} has been closed, delete local branch? (Y/n) "
                 )
             else:
-                raise UnhandledPRStateError(f"Unknown state {pr_state}")
+                raise UnhandledPRStateError(f"Unknown state {state}")
 
             if should_remove in ("", "Y", "y"):
                 self._delete_branch(branch)
