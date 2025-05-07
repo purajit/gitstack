@@ -17,6 +17,13 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
+NC = "\033[0m"
+RED = "\033[31m"
+GREEN = "\033[32m"
+GREY = "\033[90m"
+BOLD = "\033[1m"
+
+
 def read_gitstack_file() -> MutableMapping[str, str]:
     """Read the gitstack file at the current git root"""
     gitstack_path = git_get_root() / GITSTACK_FILE
@@ -63,11 +70,38 @@ def git_get_current_branch() -> str:
     return p.stdout.decode().strip()
 
 
-def print_branch_level(branch: str, current_branch: str, depth: int) -> None:
+def print_branch_level(
+    branch: str, parent_branch: str | None, current_branch: str, depth: int
+) -> None:
     """Prints a branch line as part of a tree"""
     branch_line = f"\u001b[32m{branch}\u001b[0m" if branch == current_branch else branch
-    level_indicator = " " * (2 * (depth - 1)) + "↳ "
-    print(f"{level_indicator}{branch_line}" if depth > 0 else branch_line)
+
+    level_gap = " " * (2 * (depth - 1))
+    print(f"{level_gap}↳ {branch_line}" if depth > 0 else branch_line)
+    if parent_branch is not None:
+        commits_in_branch = (
+            subprocess.run(
+                [
+                    "git",
+                    "log",
+                    f"{parent_branch}...{branch}",
+                    "--oneline",
+                    "--no-merges",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        if not commits_in_branch:
+            print(f"{RED}{level_gap}  empty branch{NC}" if depth > 0 else branch_line)
+            return
+        for commit in reversed(commits_in_branch.split("\n")):
+            commit_title = commit.split(" ", 1)[1]
+            print(
+                f"{GREY}{level_gap}  {commit_title}{NC}" if depth > 0 else branch_line
+            )
 
 
 class NoValidTrunkError(Exception):
@@ -128,10 +162,13 @@ class GitStack:
 
     def print_stack(self):
         """Pretty print the entire stack"""
+        local_branches = git_list_all_branches()
         self._traverse_stack(
             lambda branch, depth: print_branch_level(
-                branch, self.original_branch, depth
+                branch, self.gitstack.get(branch), self.original_branch, depth
             )
+            if branch in local_branches
+            else None
         )
 
     def create_prs(self):
@@ -173,16 +210,21 @@ class GitStack:
             branch = self.switch_to_parent()
 
         subprocess.run(
-            ["git", "switch", self.original_branch],
+            ["git", "switch", "-q", self.original_branch],
             check=True,
             stdout=sys.stdout.buffer,
             stderr=sys.stderr.buffer,
         )
 
-    def create_branch(self, branch: str, parent) -> None:
+    def create_branch(self, branch: str, parent: str) -> None:
         """Create new branch and add to gitstack"""
+        cmd = (
+            ["git", "checkout", "-b", branch, parent]
+            if parent
+            else ["git", "checkout", "-b", branch]
+        )
         subprocess.run(
-            ["git", "checkout", "-b", branch, parent],
+            cmd,
             check=True,
             stdout=sys.stdout.buffer,
             stderr=sys.stderr.buffer,
@@ -229,7 +271,7 @@ class GitStack:
             return current_branch
         parent = self.gitstack[current_branch]
         subprocess.run(
-            ["git", "switch", parent],
+            ["git", "switch", "-q", parent],
             check=True,
             stdout=sys.stdout.buffer,
             stderr=sys.stderr.buffer,
@@ -260,7 +302,7 @@ class GitStack:
             child_branch = child_branches_list[child_branch_idx]
 
         subprocess.run(
-            ["git", "switch", child_branch],
+            ["git", "switch", "-q", child_branch],
             check=True,
             stdout=sys.stdout.buffer,
             stderr=sys.stderr.buffer,
@@ -274,7 +316,7 @@ class GitStack:
         # been deleted in the process of sync
         if self.original_branch in git_list_all_branches():
             subprocess.run(
-                ["git", "switch", self.original_branch],
+                ["git", "switch", "-q", self.original_branch],
                 check=True,
                 stdout=sys.stdout.buffer,
                 stderr=sys.stderr.buffer,
@@ -309,7 +351,7 @@ class GitStack:
 
         # if merged, remove from gitstack
         subprocess.run(
-            ["git", "switch", branch],
+            ["git", "switch", "-q", branch],
             check=True,
             stdout=sys.stdout.buffer,
             stderr=sys.stderr.buffer,
@@ -359,8 +401,14 @@ class GitStack:
         if current_parent_sha == current_base_sha:
             print(f"Branch {branch} up-to-date with {parent}", branch, parent)
             return
-        print(f"Merging {parent} into {branch}")
-        subprocess.run(["git", "merge", "--no-ff", "--no-edit", parent], check=True)
+        if not pr_state:
+            print(f"Rebasing {branch} onto {parent}")
+            subprocess.run(["git", "rebase", "-i", parent], check=True)
+        else:
+            print(f"Merging {parent} into {branch}")
+            subprocess.run(
+                ["git", "merge", "-q", "--no-ff", "--no-edit", parent], check=True
+            )
 
     def _get_trunk(self):
         """Get name of trunk based on possible candidates"""
@@ -372,7 +420,7 @@ class GitStack:
 
     def _delete_branch(self, branch: str) -> None:
         subprocess.run(
-            ["git", "switch", self.trunk],
+            ["git", "switch", "-q", self.trunk],
             check=True,
             stdout=sys.stdout.buffer,
             stderr=sys.stderr.buffer,
