@@ -362,15 +362,16 @@ class GitStack:
                 "pr",
                 "status",
                 "--json",
-                "state",
+                "state,isDraft",
                 "--jq",
-                ".currentBranch.state",
+                ".currentBranch",
             ],
             check=True,
             capture_output=True,
         )
-        pr_state = p.stdout.decode().strip()
-        if pr_state in ("MERGED", "CLOSED"):
+        pr_state_str = p.stdout.decode().strip()
+        pr_state = json.loads(pr_state_str) if pr_state_str else {}
+        if pr_state.get("state") in ("MERGED", "CLOSED"):
             if pr_state == "MERGED":
                 should_remove = input(
                     f"Branch {branch} has already been merged into master, delete local branch? (Y/n) "
@@ -398,14 +399,14 @@ class GitStack:
             ["git", "merge-base", parent, branch], check=True, capture_output=True
         )
         current_base_sha = p.stdout.decode().strip()
+        print(f"Merging {parent} into {branch}")
         if current_parent_sha == current_base_sha:
             print(f"Branch {branch} up-to-date with {parent}", branch, parent)
             return
-        if not pr_state:
+        if not pr_state or pr_state.get("isDraft"):
             print(f"Rebasing {branch} onto {parent}")
             subprocess.run(["git", "rebase", "-i", parent], check=True)
         else:
-            print(f"Merging {parent} into {branch}")
             subprocess.run(
                 ["git", "merge", "-q", "--no-ff", "--no-edit", parent], check=True
             )
