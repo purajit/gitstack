@@ -196,11 +196,16 @@ class GitStack:
                     stdout=sys.stdout.buffer,
                     stderr=sys.stderr.buffer,
                 )
-                print(f"Updated PR for {branch}")
             else:
                 parent = self.gitstack[branch]
                 subprocess.run(
-                    ["gh", "pr", "create", "--base", parent],
+                    ["git", "push"],
+                    check=True,
+                    stdout=sys.stdout.buffer,
+                    stderr=sys.stderr.buffer,
+                )
+                subprocess.run(
+                    ["gh", "pr", "create", "--base", parent, "--draft", "--fill"],
                     check=True,
                     stdout=sys.stdout.buffer,
                     stderr=sys.stderr.buffer,
