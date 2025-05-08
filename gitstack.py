@@ -86,7 +86,7 @@ def print_branch_level(
                 [
                     "git",
                     "log",
-                    f"{parent_branch}...{branch}",
+                    f"{parent_branch}..{branch}",
                     "--oneline",
                     "--no-merges",
                 ],
