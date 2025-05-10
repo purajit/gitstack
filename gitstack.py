@@ -401,6 +401,7 @@ class GitStack:
             if should_remove in ("", "Y", "y"):
                 self._delete_branch(branch)
                 self._untrack_branch(branch)
+            print()
             return
 
         parent = self.gitstack[branch]
@@ -418,6 +419,7 @@ class GitStack:
             print(
                 f"{GREEN}Branch up-to-date {BLUE}{branch}{GREEN} -> {BLUE}{parent}{NC}"
             )
+            print()
             return
         if not pr_state or pr_state.get("isDraft"):
             rebase_commits = (
@@ -444,6 +446,7 @@ class GitStack:
             subprocess.run(
                 ["git", "merge", "-q", "--no-ff", "--no-edit", parent], check=True
             )
+        print()
 
     def _get_trunk(self):
         """Get name of trunk based on possible candidates"""
