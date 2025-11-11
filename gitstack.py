@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import json
 import logging
-import os
 import subprocess
 import sys
+from dataclasses import asdict, dataclass, field
+from functools import cached_property
 from pathlib import Path
-from typing import Callable, Iterable, List, MutableMapping, Set
+from typing import Callable, Iterable, MutableMapping
 
-GITSTACK_FILE = os.environ.get("GITSTACK_FILE", ".gitstack")
-TRUNK_CANDIDATES = ["main", "master"]
+# TODO: XDG?
+GITSTACK_CACHE_PATH = Path.home() / ".cache" / "gitstack"
+DEFAULT_TRUNK_CANDIDATES = ["main", "master", "develop"]
 
 logging.basicConfig()
 logger = logging.getLogger()
@@ -26,20 +29,41 @@ GREY = "\033[90m"
 BOLD = "\033[1m"
 
 
-def read_gitstack_file() -> MutableMapping[str, str]:
-    """Read the gitstack file at the current git root"""
-    gitstack_path = git_get_root() / GITSTACK_FILE
+@dataclass
+class GitstackConfig:
+    stacks: dict[str, str] = field(default_factory=dict)
+    trunks: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, str]):
+        return cls(**data)
+
+
+def get_gitstack_path(git_root: Path) -> Path:
+    gitstack_filename = hashlib.sha1(
+        str(git_root.relative_to(Path.home())).encode()
+    ).hexdigest()
+    gitstack_path = GITSTACK_CACHE_PATH / gitstack_filename
+    logger.debug("Using gitstack at %s", gitstack_path)
+    return gitstack_path
+
+
+def read_gitstack_file() -> GitstackConfig:
+    """Read the gitstack file for the current repo"""
+    gitstack_path = get_gitstack_path(git_get_root())
     if not Path(gitstack_path).is_file():
-        return {}
+        logger.debug("Starting a fresh gitstack!")
+        return GitstackConfig()
     with open(gitstack_path) as f:
-        return json.loads(f.read())
+        return GitstackConfig.from_dict(json.loads(f.read()))
 
 
-def write_gitstack_file(gitstack_contents: MutableMapping[str, str]):
+def write_gitstack_file(gitstack_config: GitstackConfig):
     """Write the gitstack contents back in"""
-    gitstack_path = git_get_root() / GITSTACK_FILE
+    gitstack_path = get_gitstack_path(git_get_root())
+    gitstack_path.parent.mkdir(parents=True, exist_ok=True)
     with open(gitstack_path, "w") as f:
-        f.write(json.dumps(gitstack_contents))
+        f.write(json.dumps(asdict(gitstack_config)))
 
 
 def git_get_root() -> Path:
@@ -52,7 +76,7 @@ def git_get_root() -> Path:
     return Path(p.stdout.decode().strip())
 
 
-def git_list_all_branches() -> Set[str]:
+def git_list_all_branches() -> set[str]:
     """List all locally checked out branches"""
     p = subprocess.run(
         ["git", "branch", "--format=%(refname:short)"],
@@ -120,13 +144,12 @@ class GitStack:
     def __init__(self) -> None:
         self.stack_changed = False
         self.gitstack = read_gitstack_file()
-        self.gitstack_children: MutableMapping[str, Set[str]] = {}
-        self.trunk = self._get_trunk()
+        self.gitstack_children: MutableMapping[str, set[str]] = {}
         self.original_branch = git_get_current_branch()
-        for branch, parent in self.gitstack.items():
+        for branch, parent in self.gitstack.stacks.items():
             self.gitstack_children.setdefault(parent, set()).add(branch)
 
-    def operate(self, operation: str, args: List[str]) -> None:
+    def operate(self, operation: str, args: list[str]) -> None:
         """Main entrypoint"""
         if operation in {"b", "branch"}:
             assert 1 <= len(args) <= 2
@@ -135,7 +158,7 @@ class GitStack:
             if len(args) > 1:
                 parent = self.original_branch if args[1] == "." else args[1]
             else:
-                parent = self.trunk
+                parent = self.default_trunk
             self.create_branch(branch, parent)
         elif operation in {"p", "print"}:
             assert len(args) == 0
@@ -147,9 +170,12 @@ class GitStack:
             assert len(args) == 0
             self.switch_to_child()
         elif operation in {"t", "track"}:
-            assert len(args) == 1
-            parent = args[0]
+            assert len(args) <= 1
+            parent = args[0] if args else None
             self.track_current_branch(parent)
+        elif operation in {"at", "add-trunk"}:
+            assert len(args) == 1
+            self.add_trunk(args[0])
         elif operation in {"pr"}:
             assert len(args) == 0
             self.create_prs()
@@ -167,12 +193,14 @@ class GitStack:
         local_branches = git_list_all_branches()
         self._traverse_stack(
             lambda branch, depth: print_branch_level(
-                branch, self.gitstack.get(branch), self.original_branch, depth
+                branch, self.gitstack.stacks.get(branch), self.original_branch, depth
             )
             if branch in local_branches
             else None
         )
-        untracked_branches = local_branches - self.gitstack.keys() - {self.trunk}
+        untracked_branches = (
+            local_branches - self.gitstack.stacks.keys() - set(self.trunks)
+        )
         if untracked_branches:
             print()
             print(f"{RED}Branches not tracked by gitstack:{NC}")
@@ -182,7 +210,7 @@ class GitStack:
     def create_prs(self):
         """Submit the stack starting at the current branch going down"""
         branch = self.original_branch
-        while branch != self.trunk:
+        while branch not in self.trunks:
             p = subprocess.run(
                 [
                     "gh",
@@ -205,7 +233,7 @@ class GitStack:
                     stderr=sys.stderr.buffer,
                 )
             else:
-                parent = self.gitstack[branch]
+                parent = self.gitstack.stacks[branch]
                 subprocess.run(
                     ["git", "push"],
                     check=True,
@@ -244,8 +272,14 @@ class GitStack:
         )
         self._track_branch(branch, parent)
 
-    def track_current_branch(self, parent):
+    def add_trunk(self, branch: str) -> str:
+        """Add a branch as a trunk"""
+        self.gitstack.trunks.append(branch)
+        self.stack_changed = True
+
+    def track_current_branch(self, parent: str | None):
         """Add current branch to gitstack tracking"""
+        parent = parent or self.default_trunk
         if parent not in git_list_all_branches():
             print(f"{RED}Branch {BLUE}{parent}{RED} does not exist{NC}")
             return
@@ -254,18 +288,18 @@ class GitStack:
         if branch == parent:
             print("{RED}Branch cannot be its own parent{NC}")
             return
-        if branch == self.trunk:
+        if branch in self.trunks:
             print("{RED}Trunk cannot have a parent{NC}")
             return
 
-        if branch in self.gitstack and parent == self.gitstack[branch]:
+        if branch in self.gitstack.stacks and parent == self.gitstack.stacks[branch]:
             print(
                 f"{GREY}Parent of {BLUE}{branch}{GREY} is already {BLUE}{parent}{GREY}, no changes needed.{NC}"
             )
             return
-        if branch in self.gitstack:
+        if branch in self.gitstack.stacks:
             response = input(
-                f"{RED}This will switch the parent of {BLUE}{branch}{RED} from {self.gitstack[branch]} to {BLUE}{parent}{RED} (y/N) {NC}"
+                f"{RED}This will switch the parent of {BLUE}{branch}{RED} from {self.gitstack.stacks[branch]} to {BLUE}{parent}{RED} (y/N) {NC}"
             )
             if response not in {"y", "Y"}:
                 return
@@ -276,15 +310,15 @@ class GitStack:
     def switch_to_parent(self) -> str:
         """Go one step above the stack, closer to trunk"""
         current_branch = git_get_current_branch()
-        if current_branch == self.trunk:
+        if current_branch in self.trunks:
             print(f"{GREY}Already on trunk{NC}")
             return current_branch
-        if current_branch not in self.gitstack:
+        if current_branch not in self.gitstack.stacks:
             print(
                 f"{RED}Current branch {current_branch} not tracked by gst, use `gst t <parent>` and try again{NC}"
             )
             return current_branch
-        parent = self.gitstack[current_branch]
+        parent = self.gitstack.stacks[current_branch]
         subprocess.run(
             ["git", "switch", "-q", parent],
             check=True,
@@ -296,7 +330,10 @@ class GitStack:
     def switch_to_child(self) -> str:
         """Go one step deeper into the stack, further from trunk"""
         current_branch = git_get_current_branch()
-        if current_branch != self.trunk and current_branch not in self.gitstack:
+        if (
+            current_branch not in self.trunks
+            and current_branch not in self.gitstack.stacks
+        ):
             print(f"{RED}Current branch {current_branch} isn't tracked by gst.{NC}")
             return current_branch
 
@@ -340,7 +377,7 @@ class GitStack:
     def _traverse_stack(self, fn: Callable[[str, int], None]):
         """DFS through the gitstack from trunk, calling a function on each branch"""
         visited = set()
-        tracking_stack = [(self.trunk, 0)]
+        tracking_stack = [(t, i) for i, t in enumerate(self.trunks)]
 
         while tracking_stack:
             branch, depth = tracking_stack.pop()
@@ -355,7 +392,7 @@ class GitStack:
 
     def _check_and_rebase(self, branch: str) -> None:
         """Evaluate a branch and decide what to do - merge/rebase, untrack, or remove"""
-        if branch == self.trunk:
+        if branch in self.trunks:
             return
 
         # if absent, remove from gitstack
@@ -404,7 +441,7 @@ class GitStack:
             print()
             return
 
-        parent = self.gitstack[branch]
+        parent = self.gitstack.stacks[branch]
         p = subprocess.run(
             ["git", "show-ref", "--heads", "-s", parent],
             check=True,
@@ -448,17 +485,28 @@ class GitStack:
             )
         print()
 
-    def _get_trunk(self):
+    @cached_property
+    def trunks(self) -> list[str]:
         """Get name of trunk based on possible candidates"""
         all_branches = git_list_all_branches()
-        for trunk_candidate in TRUNK_CANDIDATES:
+        trunks: list[str] = []
+        default_trunk = None
+        for trunk_candidate in DEFAULT_TRUNK_CANDIDATES + self.gitstack.trunks:
             if trunk_candidate in all_branches:
-                return trunk_candidate
-        raise NoValidTrunkError()
+                trunks.append(trunk_candidate)
+                default_trunk = default_trunk or trunk_candidate
+        if not trunks or not default_trunk:
+            raise NoValidTrunkError()
+        return trunks
+
+    @cached_property
+    def default_trunk(self) -> str:
+        """Get the default trunk to use"""
+        return self.trunks[0]
 
     def _delete_branch(self, branch: str) -> None:
         subprocess.run(
-            ["git", "switch", "-q", self.trunk],
+            ["git", "switch", "-q", self.default_trunk],
             check=True,
             stdout=sys.stdout.buffer,
             stderr=sys.stderr.buffer,
@@ -470,11 +518,11 @@ class GitStack:
             stderr=sys.stderr.buffer,
         )
 
-    def _get_branch_stack(self, branch: str) -> List[str]:
+    def _get_branch_stack(self, branch: str) -> list[str]:
         """Get the full path of the current stack [current_branch, parent, ..., trunk]"""
         stack = [branch]
-        while branch in self.gitstack:
-            branch = self.gitstack[branch]
+        while branch in self.gitstack.stacks:
+            branch = self.gitstack.stacks[branch]
             stack.append(branch)
         return stack
 
@@ -485,13 +533,13 @@ class GitStack:
     def _track_branches(self, branches: Iterable[str], parent: str) -> None:
         """Add multiple branches pointing to a specific parent all at once"""
         for branch in branches:
-            self.gitstack[branch] = parent
+            self.gitstack.stacks[branch] = parent
         self.gitstack_children.setdefault(parent, set()).update(branches)
         self.stack_changed = True
 
     def _untrack_branch(self, branch: str) -> None:
         """Remove branch from gitstack, and handle its children"""
-        parent = self.gitstack.pop(branch)
+        parent = self.gitstack.stacks.pop(branch)
         children = self.gitstack_children.pop(branch, set())
         for current_children in self.gitstack_children.values():
             if branch in current_children:
