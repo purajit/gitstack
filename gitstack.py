@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import logging
@@ -10,7 +11,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import Callable, Iterable, MutableMapping
+from typing import Callable, Generator, Iterable, MutableMapping
 
 # TODO: XDG?
 GITSTACK_CACHE_PATH = Path.home() / ".cache" / "gitstack"
@@ -67,8 +68,15 @@ def write_gitstack_file(gitstack_config: GitstackConfig):
         f.write(json.dumps(asdict(gitstack_config)))
 
 
+def set_cwd(path: Path | str) -> None:
+    """Change process cwd and keep PWD consistent for child commands."""
+    resolved_path = Path(path).resolve()
+    os.chdir(resolved_path)
+    os.environ["PWD"] = str(resolved_path)
+
+
 def git_get_root() -> Path:
-    """List all locally checked out branches"""
+    """Get the root path for the current worktree."""
     p = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
         check=True,
@@ -87,6 +95,16 @@ def git_get_common_dir() -> Path:
     return Path(p.stdout.decode().strip())
 
 
+def git_get_dir(worktree: Path | str) -> Path:
+    """Get the git dir for a specific worktree."""
+    p = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "--path-format=absolute", "--git-dir"],
+        check=True,
+        capture_output=True,
+    )
+    return Path(p.stdout.decode().strip())
+
+
 def git_list_all_branches() -> set[str]:
     """List all locally checked out branches"""
     p = subprocess.run(
@@ -97,6 +115,30 @@ def git_list_all_branches() -> set[str]:
     return set(p.stdout.decode().strip().split())
 
 
+def branch_from_ref(ref: str) -> str | None:
+    """Convert a local branch ref to a branch name."""
+    ref = ref.strip()
+    if ref.startswith("refs/heads/"):
+        return ref.removeprefix("refs/heads/")
+    return None
+
+
+def git_get_worktree_rebase_branch(worktree: Path | str) -> str | None:
+    """Get the branch a worktree is rebasing, if it is mid-rebase."""
+    git_dir = git_get_dir(worktree)
+    for head_name_path in (
+        git_dir / "rebase-merge" / "head-name",
+        git_dir / "rebase-apply" / "head-name",
+    ):
+        try:
+            branch = branch_from_ref(head_name_path.read_text())
+        except FileNotFoundError:
+            continue
+        if branch is not None:
+            return branch
+    return None
+
+
 def git_get_current_branch() -> str:
     """Get name of active branch"""
     p = subprocess.run(
@@ -104,19 +146,25 @@ def git_get_current_branch() -> str:
         check=True,
         capture_output=True,
     )
-    return p.stdout.decode().strip()
+    branch = p.stdout.decode().strip()
+    if branch != "HEAD":
+        return branch
+    return git_get_worktree_rebase_branch(git_get_root()) or branch
 
 
 def git_switch_branch(branch: str) -> None:
     """Switch to a branch, or move to the branch's existing worktree."""
-    current_worktree = str(git_get_root().resolve())
+    current_worktree = git_get_root().resolve()
     branch_worktree = git_get_branch_worktree(branch)
 
-    if branch_worktree is not None and branch_worktree != current_worktree:
-        os.chdir(branch_worktree)
+    if branch_worktree is not None and branch_worktree != str(current_worktree):
+        set_cwd(branch_worktree)
         print(
             f"{GREY}Branch {BLUE}{branch}{GREY} is active in another worktree: {BLUE}{branch_worktree}{NC}"
         )
+        return
+
+    if git_get_worktree_rebase_branch(current_worktree) == branch:
         return
 
     subprocess.run(
@@ -139,10 +187,34 @@ def git_get_branch_worktree(branch: str) -> str | None:
         if line.startswith("worktree "):
             parsed_worktree = line.removeprefix("worktree ").strip()
         elif line.startswith("branch refs/heads/"):
-            checked_out_branch = line.removeprefix("branch refs/heads/").strip()
+            checked_out_branch = branch_from_ref(line.removeprefix("branch "))
             if checked_out_branch == branch and parsed_worktree is not None:
                 return str(Path(parsed_worktree).resolve())
+        elif line == "detached" and parsed_worktree is not None:
+            rebasing_branch = git_get_worktree_rebase_branch(parsed_worktree)
+            if rebasing_branch == branch:
+                return str(Path(parsed_worktree).resolve())
     return None
+
+
+@contextmanager
+def git_branch_operation(
+    branch: str, fallback_worktree: Path
+) -> Generator[None, None, None]:
+    """Run branch operations where the branch is checked out.
+
+    If the branch already has a worktree, use it only for this operation. If it
+    does not, switch the fallback worktree instead of whichever worktree a
+    previous operation may have used.
+    """
+    previous_cwd = Path.cwd()
+    if git_get_branch_worktree(branch) is None:
+        set_cwd(fallback_worktree)
+    try:
+        git_switch_branch(branch)
+        yield
+    finally:
+        set_cwd(previous_cwd)
 
 
 def print_branch_level(
@@ -198,6 +270,8 @@ class GitStack:
 
     def __init__(self) -> None:
         self.stack_changed = False
+        self.original_worktree = git_get_root().resolve()
+        self.sync_blocked_branches: set[str] = set()
         self.gitstack = read_gitstack_file()
         self.gitstack_children: MutableMapping[str, set[str]] = {}
         self.original_branch = git_get_current_branch()
@@ -272,45 +346,47 @@ class GitStack:
         """Submit the stack starting at the current branch going down"""
         branch = self.original_branch
         while branch not in self.trunks:
-            p = subprocess.run(
-                [
-                    "gh",
-                    "pr",
-                    "status",
-                    "--json",
-                    "state",
-                    "--jq",
-                    ".currentBranch",
-                ],
-                check=True,
-                capture_output=True,
-            )
-            has_pr = bool(p.stdout.decode().strip())
-            if has_pr:
-                subprocess.run(
-                    ["git", "push"],
+            with git_branch_operation(branch, self.original_worktree):
+                p = subprocess.run(
+                    [
+                        "gh",
+                        "pr",
+                        "status",
+                        "--json",
+                        "state",
+                        "--jq",
+                        ".currentBranch",
+                    ],
                     check=True,
-                    stdout=sys.stdout.buffer,
-                    stderr=sys.stderr.buffer,
+                    capture_output=True,
                 )
-            else:
-                parent = self.gitstack.stacks[branch]
-                subprocess.run(
-                    ["git", "push"],
-                    check=True,
-                    stdout=sys.stdout.buffer,
-                    stderr=sys.stderr.buffer,
-                )
-                subprocess.run(
-                    ["gh", "pr", "create", "--base", parent, "--draft", "--fill"],
-                    check=True,
-                    stdout=sys.stdout.buffer,
-                    stderr=sys.stderr.buffer,
-                )
-                print(f"{GREEN}Created PR for {BLUE}{branch}{NC}")
+                has_pr = bool(p.stdout.decode().strip())
+                if has_pr:
+                    subprocess.run(
+                        ["git", "push"],
+                        check=True,
+                        stdout=sys.stdout.buffer,
+                        stderr=sys.stderr.buffer,
+                    )
+                else:
+                    parent = self.gitstack.stacks[branch]
+                    subprocess.run(
+                        ["git", "push"],
+                        check=True,
+                        stdout=sys.stdout.buffer,
+                        stderr=sys.stderr.buffer,
+                    )
+                    subprocess.run(
+                        ["gh", "pr", "create", "--base", parent, "--draft", "--fill"],
+                        check=True,
+                        stdout=sys.stdout.buffer,
+                        stderr=sys.stderr.buffer,
+                    )
+                    print(f"{GREEN}Created PR for {BLUE}{branch}{NC}")
 
-            branch = self.switch_to_parent()
+            branch = self.gitstack.stacks[branch]
 
+        set_cwd(self.original_worktree)
         git_switch_branch(self.original_branch)
 
     def create_branch(self, branch: str, parent: str) -> None:
@@ -413,6 +489,7 @@ class GitStack:
         # switch back to original branch once done, if it exists - it may have
         # been deleted in the process of sync
         if self.original_branch in git_list_all_branches():
+            set_cwd(self.original_worktree)
             git_switch_branch(self.original_branch)
 
     def _traverse_stack(self, fn: Callable[[str, int], None]):
@@ -442,83 +519,104 @@ class GitStack:
             self._untrack_branch(branch)
             return
 
-        # if merged, remove from gitstack
-        git_switch_branch(branch)
-        p = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "status",
-                "--json",
-                "state,isDraft",
-                "--jq",
-                ".currentBranch",
-            ],
-            check=True,
-            capture_output=True,
-        )
-        pr_state_str = p.stdout.decode().strip()
-        pr_state = json.loads(pr_state_str) if pr_state_str else {}
-        if (state := pr_state.get("state")) in ("MERGED", "CLOSED"):
-            if state == "MERGED":
-                should_remove = input(
-                    f"{RED}Branch {BLUE}{branch}{RED} has already been merged into master, delete local branch? (Y/n) {NC}"
-                )
-            elif state == "CLOSED":
-                should_remove = input(
-                    f"{RED}Branch {BLUE}{branch}{RED} has been closed, delete local branch? (Y/n) {NC}"
-                )
-            else:
-                raise UnhandledPRStateError(f"{RED}Unknown state {state}{NC}")
-
-            if should_remove in ("", "Y", "y"):
-                if self._delete_branch(branch):
-                    self._untrack_branch(branch)
-            print()
-            return
-
         parent = self.gitstack.stacks[branch]
-        p = subprocess.run(
-            ["git", "show-ref", "--heads", "-s", parent],
-            check=True,
-            capture_output=True,
-        )
-        current_parent_sha = p.stdout.decode().strip()
-        p = subprocess.run(
-            ["git", "merge-base", parent, branch], check=True, capture_output=True
-        )
-        current_base_sha = p.stdout.decode().strip()
-        if current_parent_sha == current_base_sha:
+        if parent in self.sync_blocked_branches:
+            self.sync_blocked_branches.add(branch)
             print(
-                f"{GREEN}Branch up-to-date {BLUE}{branch}{GREEN} -> {BLUE}{parent}{NC}"
+                f"{YELLOW}Skipping {BLUE}{branch}{YELLOW} because parent {BLUE}{parent}{YELLOW} did not sync.{NC}"
             )
             print()
             return
-        if not pr_state or pr_state.get("isDraft"):
-            rebase_commits = (
-                subprocess.check_output(
-                    ["git", "log", "--pretty=format:'%h %s'", f"{parent}.."]
+
+        # if merged, remove from gitstack
+        with git_branch_operation(branch, self.original_worktree):
+            current_worktree = git_get_root().resolve()
+            if git_get_worktree_rebase_branch(current_worktree) == branch:
+                self.sync_blocked_branches.add(branch)
+                print(
+                    f"{YELLOW}Branch {BLUE}{branch}{YELLOW} already has a rebase in progress in {BLUE}{current_worktree}{NC}"
                 )
-                .decode()
-                .splitlines()
+                print(
+                    f"{GREY}Finish it with `git -C {current_worktree} rebase --continue`, `--skip`, or `--abort`, then rerun gst sync.{NC}"
+                )
+                print()
+                return
+
+            p = subprocess.run(
+                [
+                    "gh",
+                    "pr",
+                    "status",
+                    "--json",
+                    "state,isDraft",
+                    "--jq",
+                    ".currentBranch",
+                ],
+                check=True,
+                capture_output=True,
             )
-            print(
-                f"{YELLOW}Rebasing these commits in {BLUE}{branch}{YELLOW} onto {BLUE}{parent}:{NC}"
+            pr_state_str = p.stdout.decode().strip()
+            pr_state = json.loads(pr_state_str) if pr_state_str else {}
+            if (state := pr_state.get("state")) in ("MERGED", "CLOSED"):
+                if state == "MERGED":
+                    should_remove = input(
+                        f"{RED}Branch {BLUE}{branch}{RED} has already been merged into master, delete local branch? (Y/n) {NC}"
+                    )
+                elif state == "CLOSED":
+                    should_remove = input(
+                        f"{RED}Branch {BLUE}{branch}{RED} has been closed, delete local branch? (Y/n) {NC}"
+                    )
+                else:
+                    raise UnhandledPRStateError(f"{RED}Unknown state {state}{NC}")
+
+                if should_remove in ("", "Y", "y"):
+                    if self._delete_branch(branch):
+                        self._untrack_branch(branch)
+                print()
+                return
+
+            p = subprocess.run(
+                ["git", "show-ref", "--heads", "-s", parent],
+                check=True,
+                capture_output=True,
             )
-            for rebase_commit in rebase_commits[::-1]:
-                print(f"* {rebase_commit}")
-            response = input(
-                f"{YELLOW}Continue (no will drop into interactive rebase)? (Y/n) {NC}"
+            current_parent_sha = p.stdout.decode().strip()
+            p = subprocess.run(
+                ["git", "merge-base", parent, branch], check=True, capture_output=True
             )
-            if response in {"n", "N"}:
-                subprocess.run(["git", "rebase", "-i", parent], check=True)
+            current_base_sha = p.stdout.decode().strip()
+            if current_parent_sha == current_base_sha:
+                print(
+                    f"{GREEN}Branch up-to-date {BLUE}{branch}{GREEN} -> {BLUE}{parent}{NC}"
+                )
+                print()
+                return
+            if not pr_state or pr_state.get("isDraft"):
+                rebase_commits = (
+                    subprocess.check_output(
+                        ["git", "log", "--pretty=format:'%h %s'", f"{parent}.."]
+                    )
+                    .decode()
+                    .splitlines()
+                )
+                print(
+                    f"{YELLOW}Rebasing these commits in {BLUE}{branch}{YELLOW} onto {BLUE}{parent}:{NC}"
+                )
+                for rebase_commit in rebase_commits[::-1]:
+                    print(f"* {rebase_commit}")
+                response = input(
+                    f"{YELLOW}Continue (no will drop into interactive rebase)? (Y/n) {NC}"
+                )
+                if response in {"n", "N"}:
+                    subprocess.run(["git", "rebase", "-i", parent], check=True)
+                else:
+                    subprocess.run(["git", "rebase", parent], check=True)
             else:
-                subprocess.run(["git", "rebase", parent], check=True)
-        else:
-            print(f"{YELLOW}Merging {BLUE}{parent}{YELLOW} into {BLUE}{branch}{NC}")
-            subprocess.run(
-                ["git", "merge", "-q", "--no-ff", "--no-edit", parent], check=True
-            )
+                print(f"{YELLOW}Merging {BLUE}{parent}{YELLOW} into {BLUE}{branch}{NC}")
+                subprocess.run(
+                    ["git", "merge", "-q", "--no-ff", "--no-edit", parent],
+                    check=True,
+                )
         print()
 
     @cached_property
